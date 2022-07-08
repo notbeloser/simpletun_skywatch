@@ -42,6 +42,11 @@
 #define CLIENT 0
 #define SERVER 1
 #define PORT 55555
+#define PASSWORD_MAX_LEN 255
+#define PASSWORD_MAX_SIZE (PASSWORD_MAX_LEN + 1)
+
+#define CONN_ACCEPT 0x00
+#define WRONG_PASSWORD 0x01
 
 int debug;
 char *progname;
@@ -160,12 +165,13 @@ void my_err(char *msg, ...) {
  **************************************************************************/
 void usage(void) {
   fprintf(stderr, "Usage:\n");
-  fprintf(stderr, "%s -i <ifacename> [-s|-c <serverIP>] [-p <port>] [-u|-a] [-d]\n", progname);
+  fprintf(stderr, "%s -i <ifacename> [-s|-c <serverIP>] [-p <port>] [-w <password>] [-u|-a] [-d]\n", progname);
   fprintf(stderr, "%s -h\n", progname);
   fprintf(stderr, "\n");
   fprintf(stderr, "-i <ifacename>: Name of interface to use (mandatory)\n");
   fprintf(stderr, "-s|-c <serverIP>: run in server mode (-s), or specify server address (-c <serverIP>) (mandatory)\n");
   fprintf(stderr, "-p <port>: port to listen on (if run in server mode) or to connect to (in client mode), default 55555\n");
+  fprintf(stderr, "-w <password>: password for access tun\n");
   fprintf(stderr, "-u|-a: use TUN (-u, default) or TAP (-a)\n");
   fprintf(stderr, "-d: outputs debug information while running\n");
   fprintf(stderr, "-h: prints this help text\n");
@@ -187,11 +193,12 @@ int main(int argc, char *argv[]) {
   socklen_t remotelen;
   int cliserv = -1;    /* must be specified on cmd line */
   unsigned long int tap2net = 0, net2tap = 0;
+  char* password = NULL;
 
   progname = argv[0];
   
   /* Check command line options */
-  while((option = getopt(argc, argv, "i:sc:p:uahd")) > 0) {
+  while((option = getopt(argc, argv, "i:w:sc:p:uahd")) > 0) {
     switch(option) {
       case 'd':
         debug = 1;
@@ -201,6 +208,14 @@ int main(int argc, char *argv[]) {
         break;
       case 'i':
         strncpy(if_name,optarg, IFNAMSIZ-1);
+        break;
+      case 'w':
+        if(strlen(optarg) > PASSWORD_MAX_LEN){
+          my_err("Password length must shorten than %d\n", PASSWORD_MAX_LEN);
+          usage();
+        }
+        password = malloc(strlen(optarg)* sizeof(char));
+        memcpy(password, optarg, strlen(optarg));
         break;
       case 's':
         cliserv = SERVER;
@@ -241,6 +256,9 @@ int main(int argc, char *argv[]) {
   } else if((cliserv == CLIENT)&&(*remote_ip == '\0')) {
     my_err("Must specify server address!\n");
     usage();
+  }else if(password == NULL){
+    my_err("Must specify password!\n");
+    usage();
   }
 
   /* initialize tun/tap interface */
@@ -270,8 +288,17 @@ int main(int argc, char *argv[]) {
       perror("connect()");
       exit(1);
     }
-
+  
     net_fd = sock_fd;
+    send(net_fd, password, strlen(password) + 1, 0);
+    char serverReply;
+    recv(net_fd, &serverReply, sizeof(serverReply), 0);
+    if(serverReply == WRONG_PASSWORD){
+      printf("connect failed, wrong password.\n");
+      exit(1);
+    }else if(serverReply == CONN_ACCEPT){
+      printf("connected, tunnel established.\n");
+    }
     do_debug("CLIENT: Connected to server %s\n", inet_ntoa(remote.sin_addr));
     
   } else {
@@ -291,7 +318,9 @@ int main(int argc, char *argv[]) {
       perror("bind()");
       exit(1);
     }
-    
+
+    LISTEN:
+
     if (listen(sock_fd, 5) < 0) {
       perror("listen()");
       exit(1);
@@ -304,7 +333,16 @@ int main(int argc, char *argv[]) {
       perror("accept()");
       exit(1);
     }
-
+    char buffer[PASSWORD_MAX_SIZE];
+    recv(net_fd, buffer, PASSWORD_MAX_SIZE, 0);
+    if(strcmp(buffer, password) != 0){
+      char msg = WRONG_PASSWORD;
+      send(net_fd, &msg, sizeof(msg), 0); //reject the connection due to wrong password
+      goto LISTEN;
+    }else{
+      char msg = CONN_ACCEPT;
+      send(net_fd, &msg, sizeof(msg), 0); //accept the connection
+    }
     do_debug("SERVER: Client connected from %s\n", inet_ntoa(remote.sin_addr));
   }
   
